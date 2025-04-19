@@ -3,8 +3,8 @@ import time
 import random
 import os
 import logging
-import getpass
 from datetime import datetime
+import sys
 
 # Set up logging
 logging.basicConfig(
@@ -51,8 +51,9 @@ def login(username, password, force_new_session=False):
             else:
                 print("⚠ Session is invalid. Logging in again...")
 
-        # Perform login
+        # Perform login with a delay to avoid rate limiting
         print("Logging in with username and password...")
+        time.sleep(random.uniform(2, 4))  # Small delay before login
         L.login(username, password)
         L.save_session_to_file(session_file)
         print("✓ Login successful! Session saved.")
@@ -62,6 +63,10 @@ def login(username, password, force_new_session=False):
         print("❌ Invalid username or password.")
     except instaloader.exceptions.ConnectionException as e:
         print(f"⚠ Connection error: {e}")
+        if "429" in str(e):
+            wait_time = random.uniform(60, 120)
+            print(f"Rate limited! Waiting {wait_time:.0f} seconds...")
+            time.sleep(wait_time)
     except instaloader.exceptions.TwoFactorAuthRequiredException:
         print("Two-factor authentication required!")
         try:
@@ -98,32 +103,94 @@ def get_shortcode(url):
 
 def smart_sleep(idx=None):
     """Sleep with randomization to avoid detection."""
-    base_delay = random.uniform(8, 12)
-    if idx and idx % random.randint(4, 8) == 0:
-        delay = random.uniform(25, 45)
+    # Base delay with some randomization
+    base_delay = random.uniform(10, 15)
+    
+    # Occasional longer pauses to mimic human behavior
+    if idx and idx % random.randint(5, 9) == 0:
+        delay = random.uniform(30, 60)
         print(f"Taking a longer break ({delay:.1f}s) to avoid rate limits...")
     else:
-        delay = base_delay
-    time.sleep(delay)
+        # Add small variability to appear more human-like
+        delay = base_delay * random.uniform(0.8, 1.2)
+    
+    # Add tiny jitter for more randomness
+    jitter = random.uniform(0, 0.5)
+    total_delay = delay + jitter
+    
+    time.sleep(total_delay)
+    return total_delay
 
-def get_post_comments(post, max_comments=None):
-    """Fetch usernames who commented on the post."""
+def get_post_comments(post, max_comments=None, username=None, password=None, retry_count=0):
+    """Fetch usernames who commented on the post with session validation."""
+    # Guard against too many retries to prevent infinite loops
+    if retry_count >= 3:
+        print("⚠ Too many retry attempts. Please try again later.")
+        return []
+    
+    # Check if session is valid before attempting to fetch comments
+    if not L.test_login():
+        print("⚠ Session invalid before fetching comments. Refreshing...")
+        if username and password:
+            if login(username, password, force_new_session=True):
+                print("Session refreshed successfully.")
+                # Small delay after login before making API request
+                time.sleep(random.uniform(3, 7))
+            else:
+                print("❌ Failed to refresh session. Exiting.")
+                return []
+    
     usernames = []
     try:
+        print("Preparing to fetch comments...")
+        # Small delay before API request
+        time.sleep(random.uniform(2, 5))
+        
         comments_iterator = post.get_comments()
         for idx, comment in enumerate(comments_iterator, 1):
-            usernames.append(comment.owner.username)
-            if idx % 10 == 0:
-                print(f"Processed {idx} comments so far...")
-            smart_sleep(idx)
-            if max_comments and idx >= max_comments:
-                break
+            try:
+                usernames.append(comment.owner.username)
+                if idx % 10 == 0:
+                    print(f"Processed {idx} comments so far...")
+                
+                # Apply smart rate limiting
+                smart_sleep(idx)
+                
+                if max_comments and idx >= max_comments:
+                    print(f"✓ Reached requested limit of {max_comments} comments")
+                    break
+            except Exception as ce:
+                print(f"Error processing comment {idx}: {ce}")
+                # Continue with next comment instead of failing completely
+                continue
+                
     except instaloader.exceptions.LoginRequiredException:
-        print("⚠ Login required. Please log in again.")
+        print("⚠ Login required during comment fetch. Refreshing session...")
+        if username and password:
+            if login(username, password, force_new_session=True):
+                print("Session refreshed. Retrying comment fetch...")
+                # Wait before retrying to avoid rate limits
+                wait_time = random.uniform(15, 30) * (retry_count + 1)
+                print(f"Waiting {wait_time:.1f}s before retry...")
+                time.sleep(wait_time)
+                # Recursive call with increased retry count
+                return get_post_comments(post, max_comments, username, password, retry_count + 1)
+            else:
+                print("Failed to refresh session.")
     except instaloader.exceptions.ConnectionException as e:
         print(f"⚠ Connection error: {e}")
+        if "429" in str(e):
+            print("Instagram rate limit detected. Taking a longer break...")
+            wait_time = random.uniform(60, 120) * (retry_count + 1)
+            print(f"Waiting {wait_time:.1f}s before retry...")
+            time.sleep(wait_time)
+            return get_post_comments(post, max_comments, username, password, retry_count + 1)
     except Exception as e:
         print(f"⚠ Error fetching comments: {e}")
+    
+    # Report results
+    if usernames:
+        print(f"Successfully retrieved {len(usernames)} usernames from comments")
     return usernames
 
 def save_usernames_to_file(usernames, filename="usernames.txt"):
@@ -144,7 +211,7 @@ def main():
     print("Instagram Username Scraper")
     print("=" * 50)
 
-    # Get credentials
+    # Hardcoded credentials
     username = "janet_thedreamer"
     password = "Ttlshiwwya2002#"
 
@@ -163,17 +230,43 @@ def main():
             continue
 
         try:
+            # Validate session before fetching post
+            if not L.test_login():
+                print("Session invalid. Refreshing before fetching post...")
+                if not login(username, password, force_new_session=True):
+                    print("❌ Failed to refresh session. Please try again.")
+                    continue
+            
+            # Fetch post data
             post = instaloader.Post.from_shortcode(L.context, shortcode)
             print(f"Fetching comments for post: {shortcode}")
+            print(f"Post by @{post.owner_username} - Has {post.comments} comments")
+            
+            # Get comment count limit
             max_comments = input("Enter max comments to fetch (default: 50): ")
             max_comments = int(max_comments) if max_comments.isdigit() else 50
-            usernames = get_post_comments(post, max_comments)
+            
+            # Get comments with automatic session validation
+            usernames = get_post_comments(post, max_comments, username, password)
+            
             if usernames:
                 save_usernames_to_file(usernames)
             else:
                 print("No usernames retrieved.")
+        except instaloader.exceptions.InstaloaderException as e:
+            print(f"❌ Instagram error: {e}")
+            # Handle specific Instagram errors
+            if "login_required" in str(e).lower() or "not logged in" in str(e).lower():
+                print("Attempting to refresh session...")
+                login(username, password, force_new_session=True)
         except Exception as e:
             print(f"❌ Error: {e}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nProcess interrupted by user. Exiting...")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        logging.exception("Critical error occurred")
